@@ -10,18 +10,26 @@ OpenCode v2 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登�
 
 ## 安装
 
+本插件通过 Git 仓库安装，源码托管在 <https://github.com/wang1plus/opencode-codebuddy-auth>。
+
 在 `opencode.json`（项目 `.opencode/opencode.json` 或全局 `~/.config/opencode/opencode.jsonc`）中添加插件即可：
 
 ```jsonc
 {
-  "plugins": ["opencode-codebuddy-auth"]
+  "plugins": ["github:wang1plus/opencode-codebuddy-auth"]
 }
 ```
 
 或使用命令安装（会自动写入 `plugins` 并安装依赖）：
 
 ```bash
-opencode plugin add opencode-codebuddy-auth
+opencode plugin add github:wang1plus/opencode-codebuddy-auth
+```
+
+默认跟随仓库默认分支（`main`）更新，服务器启动时会自动检查更新；如需固定版本，可追加 `#<分支|标签|commit>`，例如 `github:wang1plus/opencode-codebuddy-auth#v2.0.0`。手动更新已安装的插件：
+
+```bash
+opencode plugin update github:wang1plus/opencode-codebuddy-auth
 ```
 
 ### 三种配置方式，任选其一
@@ -32,7 +40,7 @@ opencode plugin add opencode-codebuddy-auth
 
 ```jsonc
 {
-  "plugins": ["opencode-codebuddy-auth"]
+  "plugins": ["github:wang1plus/opencode-codebuddy-auth"]
 }
 ```
 
@@ -42,7 +50,7 @@ opencode plugin add opencode-codebuddy-auth
 
 ```jsonc
 {
-  "plugins": ["opencode-codebuddy-auth"],
+  "plugins": ["github:wang1plus/opencode-codebuddy-auth"],
   "providers": {
     "codebuddy": {
       "package": "@opencode/ai/providers/openai-compatible",
@@ -61,7 +69,7 @@ opencode plugin add opencode-codebuddy-auth
 
 ```jsonc
 {
-  "plugins": ["opencode-codebuddy-auth"],
+  "plugins": ["github:wang1plus/opencode-codebuddy-auth"],
   "providers": {
     "codebuddy": {
       "package": "@opencode/ai/providers/openai-compatible",
@@ -173,7 +181,7 @@ opencode
 
 ```jsonc
 {
-  "plugins": ["opencode-codebuddy-auth"],
+  "plugins": ["github:wang1plus/opencode-codebuddy-auth"],
   "providers": {
     "codebuddy": {
       "settings": {
@@ -199,7 +207,7 @@ TUI 侧边栏展示 craft agent 最终可用的 CodeBuddy 模型目录（默认�
 
 ```json
 {
-  "plugin": ["opencode-codebuddy-auth"]
+  "plugin": ["github:wang1plus/opencode-codebuddy-auth"]
 }
 ```
 
@@ -242,10 +250,10 @@ npm run build   # tsc 编译到 dist/ + esbuild 打包 TUI (dist/tui.js)
 
 v2.0.14 的插件加载仅支持 npm registry 或 git spec，`file://` 与 `.opencode/plugin.ts` 写法在该版本不会加载。本地联调有两种方式：
 
-1. 将构建产物替换到已解析的缓存包：
-   `~/.cache/opencode/npm/opencode-codebuddy-auth@latest/<ts>/node_modules/opencode-codebuddy-auth/`
-   （把 `dist/` 与 `package.json` 覆盖进去，并在该包下补 `node_modules/@opencode/plugin` 依赖）
-2. 发布到本地 npm registry 后 `opencode plugin add`。
+1. 将构建产物替换到已解析的缓存包，把 `dist/` 与 `package.json` 覆盖进去，并在该包下补 `node_modules/@opencode/plugin` 依赖：
+   - npm 安装：`~/.cache/opencode/npm/opencode-codebuddy-auth@latest/<ts>/node_modules/opencode-codebuddy-auth/`
+   - git 安装：`~/.cache/opencode/git/` 下对应的仓库缓存目录
+2. 推送到 Git 仓库后 `opencode plugin add github:wang1plus/opencode-codebuddy-auth`（或发布 npm registry 后安装）。
 
 修改源码后重新构建并完全退出重启 OpenCode：
 
