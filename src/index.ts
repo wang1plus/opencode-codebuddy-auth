@@ -1,13 +1,14 @@
-import type {
-  Hooks,
-  PluginInput,
+import {
+  Credential,
+  Integration,
+  Model,
   Plugin,
-} from "@opencode-ai/plugin";
-import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
+  Provider,
+} from "@opencode/plugin";
 
 const PROVIDER_ID = "codebuddy";
+const AUTH_METHOD_ID = "ioa";
+const PROVIDER_PACKAGE = "@opencode/ai/providers/openai-compatible";
 
 const CONFIG = {
   serverUrl: "https://copilot.tencent.com",
@@ -135,6 +136,33 @@ interface RemoteConfigResponse {
   };
 }
 
+/**
+ * Deeply strip `readonly` from a schema type while preserving branded
+ * primitives (`string & Brand<...>`, `number & Brand<...>`, unions, literals).
+ * `Model.Info` (and its `Model.Info.default()` result) is declared as a
+ * readonly struct; we need a mutable copy to fill in discovered model
+ * metadata before it is registered.
+ */
+type DeepMutable<A> = A extends
+  | null
+  | undefined
+  | boolean
+  | number
+  | bigint
+  | string
+  | symbol
+  | ((...args: never[]) => unknown)
+  ? A
+  : A extends ReadonlyArray<infer I>
+    ? Array<DeepMutable<I>>
+    : A extends ReadonlyMap<infer K, infer V>
+      ? Map<DeepMutable<K>, DeepMutable<V>>
+      : A extends object
+        ? { -readonly [K in keyof A]: DeepMutable<A[K]> }
+        : A;
+
+type MutableInfo = DeepMutable<Model.Info>;
+
 const DEFAULT_MODEL: RemoteModel = {
   id: "auto",
   name: "Auto",
@@ -158,6 +186,20 @@ function formatCredits(credits?: string | null): string | undefined {
   return credits;
 }
 
+function applyBaseURLOverride(baseURL: string): void {
+  try {
+    const u = new URL(baseURL);
+    resolvedServerUrl = `${u.protocol}//${u.host}`;
+    if (resolvedServerUrl.includes("codebuddy.ai")) {
+      resolvedDomain = "www.codebuddy.ai";
+    } else {
+      resolvedDomain = CONFIG.domain;
+    }
+  } catch {
+    // keep defaults
+  }
+}
+
 function remoteBadgeLabel(badge?: RemoteModelBadge | null): string | undefined {
   return badge?.label?.trim() || undefined;
 }
@@ -170,38 +212,6 @@ function modelTierBadgeColor(tier?: string): string | undefined {
   if (tier === "standard" || tier === "trial") return "#00B159";
   if (tier === "advanced" || tier === "flagship") return "#C0701F";
   return undefined;
-}
-
-function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
-  const creditLabel = formatCredits(m.credits);
-  const entry: Record<string, unknown> = {
-    name: creditLabel ? `${m.name} (${creditLabel})` : m.name,
-  };
-  if (m.maxInputTokens || m.maxOutputTokens) {
-    entry.limit = { context: m.maxInputTokens ?? 0, output: m.maxOutputTokens ?? 0 };
-  }
-  if (m.supportsToolCall) entry.tool_call = true;
-  if (m.supportsImages) {
-    entry.attachment = true;
-    entry.modalities = { input: ["text", "image"], output: ["text"] };
-  }
-  const supportsReasoning =
-    m.supportsReasoning ||
-    m.onlyReasoning ||
-    (m.reasoning?.supportedEfforts?.length ?? 0) > 0;
-  if (supportsReasoning) {
-    entry.reasoning = true;
-    if (m.supportsToolCall) {
-      entry.interleaved = { field: "reasoning_content" as const };
-    }
-
-    const options: Record<string, unknown> = {};
-    const reasoningEffort = m.reasoning?.effort ?? m.reasoning?.defaultEffort;
-    if (reasoningEffort) options.reasoningEffort = reasoningEffort;
-    if (m.reasoning?.summary) options.reasoning_summary = m.reasoning.summary;
-    if (Object.keys(options).length > 0) entry.options = options;
-  }
-  return entry;
 }
 
 function timeToMinutes(value: string): number | undefined {
@@ -333,6 +343,15 @@ async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
       };
     })
     .filter((m): m is RemoteModel => !!m?.supportsToolCall);
+}
+
+async function fetchRemoteModelsWithTimeout(accessToken: string): Promise<RemoteModel[]> {
+  return Promise.race([
+    fetchRemoteModels(accessToken),
+    new Promise<RemoteModel[]>((resolve) =>
+      setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
+    ),
+  ]);
 }
 
 function generateUuid(): string {
@@ -593,245 +612,236 @@ async function refreshAccessToken(
   }
 }
 
-export const CodeBuddyAuthPlugin: Plugin = async (input) => {
-  return {
-    async config(config) {
-      if (!config.provider) config.provider = {};
-      if (!config.provider[PROVIDER_ID]) {
-        config.provider[PROVIDER_ID] = {
-          npm: "@ai-sdk/openai-compatible",
-          name: "CodeBuddy",
-          options: {
-            baseURL: `${resolvedServerUrl}/v2`,
-            setCacheKey: true,
-          },
-          models: {},
-        };
-      }
-      const provider = config.provider[PROVIDER_ID] as
-        | Record<string, unknown>
-        | undefined;
-      if (!provider) return;
-      const opts = (provider.options || {}) as Record<string, unknown>;
-      provider.options = opts;
-      const configuredBase = typeof opts.baseURL === "string" ? opts.baseURL : undefined;
-      if (configuredBase) {
-        try {
-          const u = new URL(configuredBase);
-          resolvedServerUrl = `${u.protocol}//${u.host}`;
-          if (resolvedServerUrl.includes("codebuddy.ai")) {
-            resolvedDomain = "www.codebuddy.ai";
-          }
-        } catch {}
-      }
-      if (!provider.models) {
-        provider.models = {};
-      }
-      const models = provider.models as Record<string, unknown>;
+// ---------------------------------------------------------------------------
+// V2 model discovery
+// ---------------------------------------------------------------------------
 
-      let discovered: RemoteModel[] = [];
-      try {
-        const home = os.homedir();
-        const authPath = path.join(home, ".local", "share", "opencode", "auth.json");
-        const raw = fs.readFileSync(authPath, "utf8");
-        const all = JSON.parse(raw) as Record<string, { type: string; access?: string }>;
-        const auth = all[PROVIDER_ID];
-        if (auth?.type === "oauth" && auth.access) {
-          const work = fetchRemoteModels(auth.access);
-          discovered = await Promise.race([
-            work,
-            new Promise<RemoteModel[]>((resolve) =>
-              setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
-            ),
-          ]);
-        }
-      } catch {
-        // auth not available yet, use fallback
-      }
+function remoteModelToInfo(m: RemoteModel, providerID: Provider.ID): Model.Info {
+  const info = Model.Info.default(
+    providerID,
+    Model.ID.make(m.id),
+  ) as unknown as MutableInfo;
+  const creditLabel = formatCredits(m.credits);
+  info.name = creditLabel ? `${m.name} (${creditLabel})` : m.name;
+  if (m.maxInputTokens || m.maxOutputTokens) {
+    info.limit.context = m.maxInputTokens ?? 0;
+    info.limit.output = m.maxOutputTokens ?? 0;
+  }
+  info.capabilities = {
+    tools: m.supportsToolCall ?? true,
+    input: m.supportsImages ? ["text", "image"] : ["text"],
+    output: ["text"],
+  };
+  const supportsReasoning =
+    m.supportsReasoning ||
+    m.onlyReasoning ||
+    (m.reasoning?.supportedEfforts?.length ?? 0) > 0;
+  if (supportsReasoning) {
+    info.compatibility = { ...(info.compatibility ?? {}), reasoningField: "reasoning_content" };
+    const reasoningEffort = m.reasoning?.effort ?? m.reasoning?.defaultEffort;
+    if (reasoningEffort) info.settings = { ...(info.settings ?? {}), reasoningEffort };
+    if (m.reasoning?.summary) info.body = { ...(info.body ?? {}), reasoning_summary: m.reasoning.summary };
+  }
+  return info;
+}
 
-      if (discovered.length === 0) {
-        discovered = [DEFAULT_MODEL];
-      }
+function defaultModelInfo(providerID: Provider.ID): Model.Info {
+  return remoteModelToInfo(DEFAULT_MODEL, providerID);
+}
 
-      const tuiModels = Object.fromEntries(
-        discovered.map((m) => {
-          const descriptionZh = m.descriptionZh?.trim();
-          const label = remoteBadgeLabel(m.badge);
-          const hoverTextZh = remoteHoverText(m.hover);
-          return [
-            m.id,
-            {
-              name: m.name,
-              ...(descriptionZh ? { descriptionZh } : {}),
-              ...(label
-                ? {
-                    badge: {
-                      label,
-                      ...(m.badge?.color ? { color: m.badge.color } : {}),
-                    },
-                  }
-                : {}),
-              ...(hoverTextZh ? { hover: { textZh: hoverTextZh } } : {}),
-            },
-          ];
-        }),
-      );
-      const tui =
-        opts.tui && typeof opts.tui === "object" && !Array.isArray(opts.tui)
-          ? (opts.tui as Record<string, unknown>)
-          : {};
-      opts.tui = { ...tui, models: tuiModels };
+async function resolveCurrentAccessToken(ctx: Plugin.Context): Promise<string> {
+  try {
+    const connection = await ctx.integration.connection.active(PROVIDER_ID);
+    if (!connection) return "";
+    const credential = await ctx.integration.connection.resolve(connection);
+    return credential?.type === "oauth" ? credential.access : "";
+  } catch {
+    return "";
+  }
+}
 
-      for (const m of discovered) {
-        if (models[m.id]) continue;
-        models[m.id] = remoteModelToConfig(m);
-      }
-    },
-    auth: {
-      provider: PROVIDER_ID,
-      async loader(getAuth, _provider) {
-        return {
-          apiKey: "cli-proxy",
-          baseURL: resolvedServerUrl,
-          async fetch(
-            url: RequestInfo | URL,
-            init?: RequestInit,
-          ): Promise<Response> {
-            const urlStr = url.toString();
-            if (!urlStr.includes("/chat/completions")) {
-              return fetch(url, init);
-            }
+async function refreshModelSource(ctx: Plugin.Context): Promise<Model.Info[]> {
+  const token = await resolveCurrentAccessToken(ctx);
+  const providerID = Provider.ID.make(PROVIDER_ID);
+  if (!token) return [defaultModelInfo(providerID)];
+  const discovered = await fetchRemoteModelsWithTimeout(token);
+  return discovered.length > 0
+    ? discovered.map((model) => remoteModelToInfo(model, providerID))
+    : [defaultModelInfo(providerID)];
+}
 
-            const currentAuth = await getAuth();
-            if (currentAuth.type !== "oauth" || !currentAuth.access) {
-              throw new Error("缺少 access token，请重新登录");
-            }
-
-            let accessToken = currentAuth.access;
-            const body = init?.body;
-            if (!body) {
-              return new Response(
-                JSON.stringify({ error: "Missing request body" }),
-                {
-                  status: 400,
-                  headers: { "Content-Type": "application/json" },
-                },
-              );
-            }
-
-            const openaiRequest = JSON.parse(
-              typeof body === "string"
-                ? body
-                : await new Response(body).text(),
-            ) as OpenAIRequest;
-
-            const resolvedModel = resolveModel(openaiRequest.model);
-            if (!resolvedModel) {
-              throw new Error(
-                "未设置模型，请设置 CODEBUDDY_DEFAULT_MODEL 或在 OpenCode 选择模型",
-              );
-            }
-
-            const requestBody: OpenAIRequest = {
-              ...openaiRequest,
-              model: resolvedModel,
-              stream: openaiRequest.stream ?? true,
-            };
-            if (openaiRequest.response_format) {
-              requestBody.response_format = openaiRequest.response_format;
-            }
-
-            const doRequest = async (token: string) => {
-              return fetch(
-                `${resolvedServerUrl}${CONFIG.chatCompletionsPath}`,
-                {
-                  method: "POST",
-                  headers: buildAuthHeaders(token, resolvedModel),
-                  body: JSON.stringify(requestBody),
-                },
-              );
-            };
-
-            let response = await doRequest(accessToken);
-
-            if (
-              (response.status === 401 || response.status === 403) &&
-              currentAuth.refresh
-            ) {
-              console.log("[codebuddy] Token expired, attempting refresh...");
-              const refreshed = await refreshAccessToken(currentAuth.refresh);
-              if (refreshed?.accessToken) {
-                accessToken = refreshed.accessToken;
-                const newExpires = refreshed.expiresIn
-                  ? Date.now() + refreshed.expiresIn * 1000
-                  : Date.now() + 24 * 60 * 60 * 1000;
-                await input.client.auth.set({
-                  path: { id: PROVIDER_ID },
-                  body: {
-                    type: "oauth",
-                    access: refreshed.accessToken,
-                    refresh: refreshed.refreshToken || currentAuth.refresh,
-                    expires: newExpires,
-                  },
-                });
-                response = await doRequest(accessToken);
-              }
-            }
-
-            if (!response.ok) {
-              const errorText = await response.text();
-              console.error(
-                `[codebuddy] API error: ${response.status} - ${errorText}`,
-              );
-              return new Response(errorText, {
-                status: response.status,
-                headers: { "Content-Type": "application/json" },
-              });
-            }
-
-            return normalizeSseResponse(response);
-          },
-        };
-      },
-      methods: [
-        {
-          label: "IOA 登录 (浏览器)",
-          type: "oauth",
-          async authorize() {
-            const authState = await requestAuthState();
-            const expiresAt = Date.now() + 10 * 60 * 1000;
-            return {
-              url: authState.url,
-              instructions: "请在浏览器中完成 IOA 登录",
-              method: "auto" as const,
-              async callback() {
-                const tokenData = await pollForToken(
-                  authState.state,
-                  expiresAt,
-                );
-                if (!tokenData) return { type: "failed" as const };
-                return {
-                  type: "success" as const,
-                  access: tokenData.accessToken,
-                  refresh: tokenData.refreshToken || "",
-                  expires: tokenData.expiresIn
-                    ? Date.now() + tokenData.expiresIn * 1000
-                    : Date.now() + 24 * 60 * 60 * 1000,
-                };
-              },
-            };
-          },
-        },
-      ],
-    },
-    async "chat.params"(input, output) {
-      if (input.model.providerID !== PROVIDER_ID) return;
-      output.options.baseURL = resolvedServerUrl;
-    },
-  } satisfies Hooks;
-};
-
-export default {
+export default Plugin.define({
   id: "codebuddy-auth",
-  server: CodeBuddyAuthPlugin,
-};
+  async setup(ctx) {
+    const providerID = Provider.ID.make(PROVIDER_ID);
+    const integrationID = Integration.ID.make(PROVIDER_ID);
+
+    // Current discovered model inventory. Captured by the provider transform
+    // and refreshed (then replayed via `ctx.provider.reload()`) after the
+    // credential changes or the user (re)connects.
+    let currentModels: Model.Info[] = await refreshModelSource(ctx);
+
+    await ctx.provider.transform((editor) => {
+      const injected = new Set(currentModels.map((model) => model.id));
+      const existing = editor.get(PROVIDER_ID);
+      if (!existing) {
+        editor.add({
+          info: {
+            ...Provider.Info.empty(providerID),
+            name: "CodeBuddy",
+            activation: "auto",
+            package: PROVIDER_PACKAGE,
+            integrationID,
+            settings: { baseURL: `${resolvedServerUrl}/v2` },
+          },
+          models: currentModels,
+        });
+        return;
+      }
+      // A user-declared `providers.codebuddy` block is honored: keep its
+      // baseURL (environment switch), fill in the runtime package when it was
+      // omitted, and never overwrite user-declared models.
+      editor.update(PROVIDER_ID, (provider) => {
+        if (!provider.package) provider.package = PROVIDER_PACKAGE;
+        if (!provider.integrationID) provider.integrationID = integrationID;
+        const baseURL = provider.settings?.baseURL;
+        if (typeof baseURL === "string" && baseURL) applyBaseURLOverride(baseURL);
+      });
+      const declared = [...existing.models.values()].filter(
+        (model) => !injected.has(model.id),
+      );
+      const merged = [
+        ...declared,
+        ...currentModels.filter((model) => !declared.some((item) => item.id === model.id)),
+      ];
+      editor.models.set(PROVIDER_ID, merged);
+    });
+
+    await ctx.integration.transform((editor) => {
+      editor.update(PROVIDER_ID, (integration) => {
+        integration.name = "CodeBuddy";
+      });
+      editor.method.update({
+        integrationID,
+        method: {
+          id: Integration.MethodID.make(AUTH_METHOD_ID),
+          type: "oauth",
+          label: "IOA 登录 (浏览器)",
+        },
+        async authorize() {
+          const authState = await requestAuthState();
+          const expiresAt = Date.now() + 10 * 60 * 1000;
+          const callback = pollForToken(authState.state, expiresAt).then(
+            (tokenData): Credential.OAuth => {
+              if (!tokenData?.accessToken) {
+                throw new Error("IOA 登录超时或已取消，请重试");
+              }
+              return {
+                type: "oauth",
+                methodID: Integration.MethodID.make(AUTH_METHOD_ID),
+                access: tokenData.accessToken,
+                refresh: tokenData.refreshToken || "",
+                expires: tokenData.expiresIn
+                  ? Date.now() + tokenData.expiresIn * 1000
+                  : Date.now() + 24 * 60 * 60 * 1000,
+              };
+            },
+          );
+          return {
+            url: authState.url,
+            instructions: "请在浏览器中完成 IOA 登录",
+            mode: "auto",
+            callback,
+          };
+        },
+        async refresh(credential) {
+          if (!credential.refresh) return credential;
+          const refreshed = await refreshAccessToken(credential.refresh);
+          if (!refreshed?.accessToken) return credential;
+          return {
+            ...credential,
+            access: refreshed.accessToken,
+            refresh: refreshed.refreshToken || credential.refresh,
+            expires: refreshed.expiresIn
+              ? Date.now() + refreshed.expiresIn * 1000
+              : credential.expires,
+          };
+        },
+      });
+    });
+
+    await ctx.session.hook(
+      "http.request",
+      async (event) => {
+        const original = event.request;
+
+        // The core injects the OAuth access token as a bearer credential before
+        // this hook runs. Fall back to resolving it ourselves when absent.
+        let accessToken =
+          original.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
+        if (!accessToken) {
+          const connection = await ctx.integration.connection.active(PROVIDER_ID);
+          const credential = connection
+            ? await ctx.integration.connection.resolve(connection)
+            : undefined;
+          if (credential?.type === "oauth") accessToken = credential.access;
+        }
+        if (!accessToken) {
+          throw new Error("未登录 CodeBuddy，请先执行 `opencode auth login codebuddy`");
+        }
+
+        const body = (await original.clone().json()) as OpenAIRequest;
+        const resolvedModel = resolveModel(body.model);
+        if (!resolvedModel) {
+          throw new Error(
+            "未设置模型，请设置 CODEBUDDY_DEFAULT_MODEL 或在 OpenCode 选择模型",
+          );
+        }
+
+        event.request = new Request(original, {
+          method: "POST",
+          headers: buildAuthHeaders(accessToken, resolvedModel),
+          body: JSON.stringify({
+            ...body,
+            model: resolvedModel,
+            stream: true,
+          }),
+        });
+      },
+      { providerID: PROVIDER_ID },
+    );
+
+    await ctx.session.hook(
+      "http.response",
+      (event) => {
+        event.response = normalizeSseResponse(event.response);
+      },
+      { providerID: PROVIDER_ID },
+    );
+
+    // Re-discover models when the CodeBuddy credential (or an integration
+    // connection) changes at this location.
+    const controller = new AbortController();
+    const locationDirectory = ctx.location.directory;
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        if (event.type !== "credential.updated" && event.type !== "credential.switched") {
+          continue;
+        }
+        if (event.location?.directory && event.location.directory !== locationDirectory) {
+          continue;
+        }
+        if (
+          event.type === "credential.switched" &&
+          event.data.integrationID !== PROVIDER_ID
+        ) {
+          continue;
+        }
+        currentModels = await refreshModelSource(ctx);
+        await ctx.provider.reload();
+      }
+    })();
+
+    return () => controller.abort();
+  },
+});
