@@ -15,6 +15,8 @@ npm test            # 编译后运行 node:test（test/*.test.mjs）
 
 无 lint。测试通过 `dist/` 导入被测模块，因此 `npm test` 会先构建。构建产物 `src/index.ts` → `dist/index.js`，`src/tui.tsx` → `dist/tui.js`（`build.tui.mjs`，external 为 `@opencode/*`、`@opentui/*`、`solid-js`）。
 
+> ⚠️ `package.json` 的 scripts 不能出现 `build` / `prepare` / `prepack` / `preinstall` / `install` / `postinstall`：pacote 会因此对 git 依赖执行准备流程，触发 OpenCode 内置 npm 的自调用 bug，使 `opencode plugin add github:...` 报 `git dep preparation failed`。编译脚本固定叫 `compile`，`test/package.test.mjs` 会拦截回归。
+
 CI：`.github/workflows/ci.yml`（PR/push 跑 typecheck + test）；`.github/workflows/release.yml`（push main 自动升 patch、构建 dist、提交、打 tag、发 Release，release commit 带 `[skip ci]`）。`dist/` 由 release 工作流提交，不再 gitignore。
 
 ## 模块

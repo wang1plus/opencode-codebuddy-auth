@@ -88,12 +88,15 @@ opencode plugin update github:wang1plus/opencode-codebuddy-auth
 
 ### `git dep preparation failed`
 
-OpenCode 2.1.4 内置的 npm 在准备 git 依赖时会错误地再次调用自身（日志中表现为 `CliError/ShowHelp`），与网络无关。绕过方式是先用系统 npm 把插件装进 OpenCode 的缓存目录，再手动添加配置：
+旧版本（<= 2.0.3）的 `package.json` 声明了 `build` 脚本。npm 的 pacote 只要看到 `build` / `prepare` / `prepack` / `preinstall` / `install` / `postinstall`（或 workspaces）就会对 git 依赖执行准备流程，而 OpenCode 内置 npm 无法在准备流程里再次调用自身，于是报：
+
+```
+NpmInstallFailedError (cause: Error: git dep preparation failed)
+```
+
+2.0.4 起脚本已改名为 `compile`，不再触发 pacote 准备流程，`opencode plugin add github:wang1plus/opencode-codebuddy-auth` 可直接安装。升级到最新版本即可；如果仍用旧版本，可先用系统 npm 手动装进缓存：
 
 ```bash
-# 先执行一次 opencode plugin add，让 OpenCode 创建缓存目录（会失败）
-opencode plugin add github:wang1plus/opencode-codebuddy-auth
-
 BASE=$(ls -d ~/.cache/opencode/npm/git-opencode-codebuddy-auth-* | head -1)
 TS=$(node -e 'console.log(Date.now())')
 mkdir -p "$BASE/$TS" && cd "$BASE/$TS"
@@ -101,7 +104,7 @@ printf '{"dependencies":{"opencode-codebuddy-auth":"github:wang1plus/opencode-co
 npm install --no-audit --no-fund
 ```
 
-然后在 `~/.config/opencode/opencode.jsonc` 的 `plugins` 与 `~/.config/opencode/cli.json` 的 `plugins` 中加入该插件，重启 OpenCode。
+> 维护提示：不要在 `package.json` 里添加上述会触发 pacote 准备的脚本名，`test/package.test.mjs` 会拦截这种回归。
 
 ## 登录
 
