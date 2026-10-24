@@ -1,0 +1,108 @@
+name: Release
+
+# Push 到 main 后自动：跑测试 → 升 patch 版本 → 重新构建 dist → 提交 → 打 tag → 发 GitHub Release。
+# 手动触发时可选择 current / patch / minor / major。
+# 自动提交的 release commit 带 [skip ci]，不会再次触发本工作流；dist/ 由本工作流独占维护。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "版本变化（current 只给当前 package.json 版本打 tag）"
+        type: choice
+        default: patch
+        options: [current, patch, minor, major]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[skip release]')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Bump version, rebuild dist and tag
+        id: cut
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            bump="${{ inputs.bump }}"
+          else
+            bump="patch"
+          fi
+
+          if [ "$bump" = "current" ]; then
+            tag="v$(node -p "require('./package.json').version")"
+          else
+            tag="$(npm version "$bump" --no-git-tag-version)"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::tag $tag 已存在，请换一个版本"
+            exit 1
+          fi
+
+          npm run build
+          git add -A
+          git commit -m "chore: release $tag [skip ci]"
+
+          git tag -a "$tag" -m "$tag"
+          git push origin HEAD:main
+          git push origin "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the tagged tree is consistent
+        env:
+          TAG: ${{ steps.cut.outputs.tag }}
+        run: |
+          set -euo pipefail
+          npm run build
+          if [ -n "$(git status --porcelain -- dist)" ]; then
+            echo "::error::dist/ 与源码不同步"
+            git --no-pager diff --stat -- dist
+            exit 1
+          fi
+          version="$(node -p "require('./package.json').version")"
+          if [ "$version" != "${TAG#v}" ]; then
+            echo "::error::package.json 版本 $version 与 tag $TAG 不一致"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.cut.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 已存在，仅同步标题"
+            gh release edit "$TAG" --title "$TAG"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag
+          fi

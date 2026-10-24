@@ -1,10 +1,6 @@
 # opencode-codebuddy-auth
 
-OpenCode v2 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录后，可在 OpenCode 中使用 CodeBuddy 的对话模型。支持自动从 `/v3/config` 动态获取 craft agent 可用模型列表，支持国内版和国际版切换，并提供 TUI 侧边栏模型目录。
-
-<p align="center">
-  <img src="images/tui-sidebar.png" width="70%" alt="OpenCode 中的 CodeBuddy TUI 侧边栏" />
-</p>
+OpenCode v2 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录后，可在 OpenCode 中使用 CodeBuddy 的对话模型。支持自动从 `/v3/config` 动态获取 craft agent 可用模型列表、推理强度 variants、积分余额查询，以及国内版和国际版切换。
 
 > **V2 版本**：本插件基于 OpenCode v2（`@opencode/plugin`，`Plugin.define` + Promise API）。V1 插件（config/auth/loader hooks）不会被 v2 宿主加载。
 
@@ -26,7 +22,7 @@ OpenCode v2 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登�
 opencode plugin add github:wang1plus/opencode-codebuddy-auth
 ```
 
-默认跟随仓库默认分支（`main`）更新，服务器启动时会自动检查更新；如需固定版本，可追加 `#<分支|标签|commit>`，例如 `github:wang1plus/opencode-codebuddy-auth#v2.0.0`。手动更新已安装的插件：
+默认跟随仓库默认分支（`main`）更新，服务器启动时会自动检查更新；如需固定版本，可追加 `#<分支|标签|commit>`，例如 `github:wang1plus/opencode-codebuddy-auth#v2.0.1`。手动更新已安装的插件：
 
 ```bash
 opencode plugin update github:wang1plus/opencode-codebuddy-auth
@@ -120,7 +116,9 @@ opencode debug config
 
 ### 推理（Reasoning）支持
 
-插件为支持推理的动态模型写入 `compatibility.reasoningField = "reasoning_content"`，并将 `/v3/config` 返回的 `reasoning.effort`（新格式回退 `reasoning.defaultEffort`）与 `reasoning.summary` 分别写入模型 `settings.reasoningEffort` 和 `body.reasoning_summary`。请求经 fetch 拦截器发送到 CodeBuddy。
+插件为支持推理的动态模型写入 `compatibility.reasoningField = "reasoning_content"`，并将 `/v3/config` 返回的 `reasoning.effort`（新格式回退 `reasoning.defaultEffort`）与 `reasoning.summary` 分别写入模型 `settings.reasoningEffort` 和 `body.reasoning_summary`。
+
+`reasoning.supportedEfforts` 会生成可切换的模型 variants（如 `low` / `medium` / `high`）；`reasoning.canDisableThinking = true` 时额外提供 `none`（关闭思考）。只支持推理的模型（`onlyReasoning`）会写入 `compatibility.requireReasoning = true`。在 OpenCode 中可通过模型 variant 选择器切换。
 
 CodeBuddy 的 SSE reasoning chunk 会携带空的 `tool_calls: []`。OpenAI 兼容适配器会把空数组误判为工具调用开始，导致推理被拆成多个片段。插件的 `http.response` 仅删除 `choices[].delta.tool_calls` 的空数组；非空工具调用和其它字段保持不变。
 
@@ -151,6 +149,22 @@ curl -H 'Accept: application/json, text/plain, */*' \
 
 - `data.models` — 所有可用模型的详细信息
 - `data.agents[].models` — craft agent 可用的模型 ID 列表
+
+## 积分余额
+
+余额通过 CodeBuddy 的 Billing 接口读取：
+
+```bash
+curl -X POST 'https://www.codebuddy.cn/v2/billing/meter/get-user-resource' \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "X-Domain: www.codebuddy.cn" \
+  -H "X-User-Id: <UID>" \
+  -H "X-Enterprise-Id: <ENTERPRISE_ID>" \
+  -H "Content-Type: application/json" \
+  -d '{"PageNumber":1,"PageSize":100,"ProductCode":"p_tcaca","Status":[0,3],"PackageEndTimeRangeBegin":"2026-01-01 00:00:00","PackageEndTimeRangeEnd":"2126-12-31 23:59:59"}'
+```
+
+`Response.Data.Accounts` 中每个套餐按 `CycleCapacity*` / `Capacity*` 计算剩余与已用量，插件汇总 `totalRemain` / `totalUsed` / `totalSize`，并取仍有余额套餐中最早的到期时间。国际版接口位于 `https://www.workbuddy.ai`（由 `baseURL` 自动选择）。
 
 ## 环境变量
 
@@ -201,7 +215,14 @@ opencode
 
 ## TUI 侧边栏
 
-TUI 侧边栏展示 craft agent 最终可用的 CodeBuddy 模型目录（默认折叠，点击标题展开）。将鼠标移到模型名称上时显示详情（推理/工具/图片/上下文/输出限制）。基于 v2 `ui.slot` 渲染，不跟踪当前选择。
+TUI 侧边栏显示 CodeBuddy 账户的**积分余额**（默认每 5 分钟刷新，点击标题立即刷新）：
+
+- 剩余积分与已用 / 总量
+- 已用百分比进度条
+- 最近一个仍有余额的套餐到期日
+- 未登录或接口失败时显示原因
+
+余额由 server 插件通过 `POST /v2/billing/meter/get-user-resource` 获取，再经插件 RPC 通道提供给 TUI；TUI 本身不接触 access token。国内版请求 `https://www.codebuddy.cn`，国际版请求 `https://www.workbuddy.ai`。
 
 使用 `opencode plugin add` 安装后 TUI 会自动启用（写入 `tui.json` 的 `plugin` 数组）。也可手动配置，在 `~/.config/opencode/tui.json`（或项目 `.opencode/tui.json`）加入：
 
@@ -221,7 +242,8 @@ OpenCode v2 插件 (@opencode/plugin, Plugin.define)
   │           创建 providers.codebuddy（package=@opencode/ai/providers/openai-compatible,
   │           settings.baseURL=<server>/v2, integrationID=codebuddy）
   │           通过 GET /v3/config 动态发现 craft agent 可用模型，注入 models
-  │           （未登录或失败 fallback 为 auto；不覆盖用户手动声明的 models）
+  │           （含 reasoning variants；未登录或失败 fallback 为 auto；
+  │            不覆盖用户手动声明的 models）
   ├─ setup → ctx.integration.transform
   │           注册 "ioa" oauth 方法（浏览器 IOA 登录 → 轮询 token；
   │           refresh 由宿主的 credential 刷新流程自动调用）
@@ -230,6 +252,8 @@ OpenCode v2 插件 (@opencode/plugin, Plugin.define)
   │           改写 body（model + stream: true）后转发到 CodeBuddy
   ├─ ctx.session.hook("http.response", …)
   │           规范化空 tool_calls 后透传 OpenAI 兼容 SSE 响应
+  ├─ ctx.rpc.register(creditsRpc)
+  │           向 TUI 暴露积分余额（内部调用 billing meter 接口）
   └─ ctx.event.subscribe
             监听 credential.updated / credential.switched（按目录 + integrationID 过滤）
             重新发现模型并 ctx.provider.reload()
@@ -243,8 +267,18 @@ OpenCode v2 插件 (@opencode/plugin, Plugin.define)
 
 ```bash
 npm install
-npm run build   # tsc 编译到 dist/ + esbuild 打包 TUI (dist/tui.js)
+npm run build       # tsc 编译到 dist/ + esbuild 打包 TUI (dist/tui.js)
+npm run typecheck   # 只做类型检查
+npm test            # 构建后运行 node:test 测试
 ```
+
+测试覆盖模型解析（含 reasoning variants）、积分汇总、JWT/请求头、SSE 规范化，以及 provider transform / RPC 的插件装配逻辑。
+
+### CI 与发布
+
+- `.github/workflows/ci.yml`：PR 和 main push 上跑 `typecheck` + `test`。
+- `.github/workflows/release.yml`：push 到 main 后自动跑测试、升 patch 版本、重新构建 `dist/`、提交、打 `vX.Y.Z` tag 并创建 GitHub Release；也可手动触发并选择 `current` / `patch` / `minor` / `major`。不想让某次 push 发版时，在 commit message 里加 `[skip release]`（`[skip ci]` 会同时跳过 CI 和发布）。
+- `dist/` 由 release 工作流维护（自动提交，release commit 带 `[skip ci]` 避免循环）。
 
 ### 本地加载（v2.0.14 注意事项）
 
