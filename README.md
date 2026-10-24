@@ -295,9 +295,9 @@ OpenCode v2 插件 (@opencode/plugin, Plugin.define)
 
 ```bash
 npm install
-npm run build       # tsc 编译到 dist/ + esbuild 打包 TUI (dist/tui.js)
+npm run compile       # tsc 编译到 dist/ + esbuild 打包 TUI (dist/tui.js)
 npm run typecheck   # 只做类型检查
-npm test            # 构建后运行 node:test 测试
+npm test            # 编译后运行 node:test 测试
 ```
 
 测试覆盖模型解析（含 reasoning variants）、积分汇总、JWT/请求头、SSE 规范化，以及 provider transform / RPC 的插件装配逻辑。
@@ -320,7 +320,7 @@ v2.0.14 的插件加载仅支持 npm registry 或 git spec，`file://` 与 `.ope
 修改源码后重新构建并完全退出重启 OpenCode：
 
 ```bash
-npm run build
+npm run compile
 opencode
 ```
 

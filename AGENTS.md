@@ -8,9 +8,9 @@ OpenCode v2 插件，为 CodeBuddy 提供 IOA OAuth 认证、模型发现、请�
 
 ```bash
 npm install
-npm run build       # tsc 编译到 dist/ + esbuild 打包 TUI -> dist/tui.js
+npm run compile       # tsc 编译到 dist/ + esbuild 打包 TUI -> dist/tui.js
 npm run typecheck   # 只做类型检查
-npm test            # build 后运行 node:test（test/*.test.mjs）
+npm test            # 编译后运行 node:test（test/*.test.mjs）
 ```
 
 无 lint。测试通过 `dist/` 导入被测模块，因此 `npm test` 会先构建。构建产物 `src/index.ts` → `dist/index.js`，`src/tui.tsx` → `dist/tui.js`（`build.tui.mjs`，external 为 `@opencode/*`、`@opentui/*`、`solid-js`）。
