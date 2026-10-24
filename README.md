@@ -84,6 +84,25 @@ opencode plugin update github:wang1plus/opencode-codebuddy-auth
 
 > 插件启动时通过 provider transform 创建/补充 `providers.codebuddy`，并调用 `GET /v3/config` 动态获取 craft agent 可用模型注入到 `models`。未登录或获取失败时 fallback 为 `auto` 默认模型。手动声明的模型永远优先，不会被覆盖。
 
+## 安装故障排查
+
+### `git dep preparation failed`
+
+OpenCode 2.1.4 内置的 npm 在准备 git 依赖时会错误地再次调用自身（日志中表现为 `CliError/ShowHelp`），与网络无关。绕过方式是先用系统 npm 把插件装进 OpenCode 的缓存目录，再手动添加配置：
+
+```bash
+# 先执行一次 opencode plugin add，让 OpenCode 创建缓存目录（会失败）
+opencode plugin add github:wang1plus/opencode-codebuddy-auth
+
+BASE=$(ls -d ~/.cache/opencode/npm/git-opencode-codebuddy-auth-* | head -1)
+TS=$(node -e 'console.log(Date.now())')
+mkdir -p "$BASE/$TS" && cd "$BASE/$TS"
+printf '{"dependencies":{"opencode-codebuddy-auth":"github:wang1plus/opencode-codebuddy-auth"}}\n' > package.json
+npm install --no-audit --no-fund
+```
+
+然后在 `~/.config/opencode/opencode.jsonc` 的 `plugins` 与 `~/.config/opencode/cli.json` 的 `plugins` 中加入该插件，重启 OpenCode。
+
 ## 登录
 
 ```bash
@@ -224,7 +243,16 @@ TUI 侧边栏显示 CodeBuddy 账户的**积分余额**（默认每 5 分钟刷�
 
 余额由 server 插件通过 `POST /v2/billing/meter/get-user-resource` 获取，再经插件 RPC 通道提供给 TUI；TUI 本身不接触 access token。国内版请求 `https://www.codebuddy.cn`，国际版请求 `https://www.workbuddy.ai`。
 
-使用 `opencode plugin add` 安装后 TUI 会自动启用（写入 `tui.json` 的 `plugin` 数组）。也可手动配置，在 `~/.config/opencode/tui.json`（或项目 `.opencode/tui.json`）加入：
+使用 `opencode plugin add` 安装后 TUI 会自动启用。手动配置时，OpenCode v2.1.4 的 TUI 插件列表位于 `~/.config/opencode/cli.json`：
+
+```json
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": ["github:wang1plus/opencode-codebuddy-auth"]
+}
+```
+
+旧版本的 `~/.config/opencode/tui.json`（或项目 `.opencode/tui.json`）仍会被自动迁移：
 
 ```json
 {
