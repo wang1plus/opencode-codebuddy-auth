@@ -212,7 +212,7 @@ test("setup registers a provider with discovered models and reasoning variants",
   await withFetch(state.fetch, async () => {
     const cleanup = await plugin.setup(ctx);
     const entry = state.providers.get("codebuddy");
-    assert.equal(entry.provider.activation, "auto");
+    assert.equal(entry.provider.activation, "enabled");
     assert.equal(entry.provider.package, "@opencode/ai/providers/openai-compatible");
     assert.equal(entry.provider.settings.baseURL, "https://copilot.tencent.com/v2");
     assert.deepEqual([...entry.models.keys()], ["auto", "plain"]);

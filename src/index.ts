@@ -108,7 +108,7 @@ export default Plugin.define({
           info: {
             ...Provider.Info.empty(PROVIDER_ID_MAKE),
             name: "CodeBuddy",
-            activation: "auto",
+            activation: "enabled",
             package: PROVIDER_PACKAGE,
             integrationID,
             settings: { baseURL: `${environment.serverUrl}/v2` },
